@@ -1,0 +1,260 @@
+# load.py ------------------------------------------------------------------
+#!/usr/bin/env python3
+"""
+Script to load CSV data into Google Cloud Bigtable.
+"""
+import os
+import pandas as pd
+from google.cloud import bigtable
+from google.cloud.bigtable import column_family
+from google.cloud.bigtable import row
+
+# configuration
+PROJECT_ID = 'cs498-451021'
+INSTANCE_ID = 'ev-bigtable'
+TABLE_ID = 'ev-population'
+CSV_FILE = 'Electric_Vehicle_Population_Data.csv'
+
+# intializing bigtable client
+client = bigtable.Client(project=PROJECT_ID, admin=True)
+instance = client.instance(INSTANCE_ID)
+table = instance.table(TABLE_ID)
+
+# Read CSV in chunks to handle large files
+chunk_size = 1000
+chunks = pd.read_csv(CSV_FILE, chunksize=chunk_size)
+
+total_rows = 0
+for i, chunk in enumerate(chunks):
+    print(f"Processing chunk {i+1}...")
+    
+    rows_to_insert = []
+    for idx, row_data in chunk.iterrows():
+        row_key = str(row_data.iloc[0]).encode()
+        if not row_key or row_key == b'nan':
+            row_key = f"row-{total_rows + idx}".encode()
+        
+        direct_row = row.DirectRow(row_key)
+        
+        for col_name, value in row_data.items():
+            if pd.isna(value):
+                continue
+                
+            column = f"{col_name}".encode()
+            cell_value = str(value).encode()
+            
+            direct_row.set_cell(
+                'ev_data',
+                column,
+                cell_value,
+                timestamp=None
+            )
+        
+        rows_to_insert.append(direct_row)
+    
+    if rows_to_insert:
+        table.mutate_rows(rows_to_insert)
+        total_rows += len(rows_to_insert)
+        print(f"Inserted {len(rows_to_insert)} rows. Total rows inserted: {total_rows}")
+
+print(f"Completed loading {total_rows} rows to Bigtable table {TABLE_ID}") 
+
+----------------------------------------------------------------------------------------------
+
+#app.py
+#!/usr/bin/env python3
+"""
+Flask API for interacting with Google Cloud Bigtable containing EV population data.
+"""
+from flask import Flask, jsonify
+from google.cloud import bigtable
+from google.cloud.bigtable import column_family
+from google.cloud.bigtable import row_filters
+
+#configuration
+PROJECT_ID = 'cs498-451021'
+INSTANCE_ID = 'ev-bigtable'
+TABLE_ID = 'ev-population'
+
+app = Flask(__name__)
+
+def get_bigtable_client():
+    """Initialize and return a Bigtable client."""
+    return bigtable.Client(project=PROJECT_ID, admin=True)
+
+@app.route('/')
+def home():
+    """Home page that lists available endpoints."""
+    endpoints = {
+        "/rows": "Returns the total number of entries in Bigtable",
+        "/Best-BMW": "Find the count of BMW EVs with an electric range > 100 miles",
+        "/tesla-owners": "Retrieve the count of all Tesla vehicles registered in Seattle",
+        "/update": "Update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles (POST)",
+        "/delete": "Delete all records where the model year is less than 2014 and retrieve the count of remaining records (DELETE)"
+    }
+    return jsonify(endpoints)
+
+@app.route('/rows', methods=['GET'])
+def get_total_rows():
+    """Returns the total number of entries in Bigtable."""
+    client = get_bigtable_client()
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    
+    # filter to just get row data
+    row_filter = row_filters.CellsColumnLimitFilter(1)
+    
+    # Count rows by reading them with the filter
+    row_count = 0
+    rows = table.read_rows(filter_=row_filter)
+    for row in rows:
+        row_count += 1
+    
+    return str(row_count)
+
+@app.route('/Best-BMW', methods=['GET'])
+def get_best_bmw():
+    """Find the count of BMW EVs with an electric range > 100 miles."""
+    client = get_bigtable_client()
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    
+    family_filter = row_filters.FamilyNameRegexFilter(b'ev_info')
+    
+    # Read the rows with just the family filter
+    rows = table.read_rows(filter_=family_filter)
+    
+    # Process the rows to find BMW EVs with range > 100
+    count = 0
+    for row in rows:
+        make = None
+        electric_range = None
+        
+        for column_family_id, columns in row.cells.items():
+            for column_qualifier, cells in columns.items():
+                if column_qualifier == b'Make':
+                    make = cells[0].value.decode('utf-8')
+                elif column_qualifier == b'Electric Range':
+                    try:
+                        electric_range = float(cells[0].value.decode('utf-8'))
+                    except ValueError:
+                        continue
+        
+        if make == 'BMW' and electric_range is not None and electric_range > 100:
+            count += 1
+    
+    return str(count)
+
+@app.route('/tesla-owners', methods=['GET'])
+def get_tesla_in_seattle():
+    """Retrieve the count of all Tesla vehicles registered in Seattle."""
+    client = get_bigtable_client()
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    
+    family_filter = row_filters.FamilyNameRegexFilter(b'ev_info')
+    
+    rows = table.read_rows(filter_=family_filter)
+    
+    # Count Tesla vehicles in Seattle
+    count = 0
+    for row in rows:
+        make = None
+        city = None
+        
+        for column_family_id, columns in row.cells.items():
+            for column_qualifier, cells in columns.items():
+                if column_qualifier == b'Make':
+                    make = cells[0].value.decode('utf-8')
+                elif column_qualifier == b'City':
+                    city = cells[0].value.decode('utf-8')
+        
+        if make == 'TESLA' and city == 'Seattle':
+            count += 1
+    
+    return str(count)
+
+@app.route('/update', methods=['POST'])
+def update_vehicle():
+    """Update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles."""
+    client = get_bigtable_client()
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    
+    # First, find the row with the specified DOL Vehicle ID
+    family_filter = row_filters.FamilyNameRegexFilter(b'ev_info')
+    
+    # Read the rows with just the family filter
+    rows = table.read_rows(filter_=family_filter)
+    
+    target_row_key = None
+    for row in rows:
+        for column_family_id, columns in row.cells.items():
+            for column_qualifier, cells in columns.items():
+                if column_qualifier == b'DOL Vehicle ID':
+                    if cells[0].value.decode('utf-8') == '257246118':
+                        target_row_key = row.row_key
+                        break
+    
+    if target_row_key:
+        # Update the Electric Range for this row
+        row_to_update = table.direct_row(target_row_key)
+        row_to_update.set_cell(
+            'ev_info',
+            b'Electric Range',
+            b'200',
+            timestamp=None
+        )
+        row_to_update.commit()
+        
+        return "Success"
+    else:
+        return "Vehicle not found", 404
+
+@app.route('/delete', methods=['DELETE'])
+def delete_old_vehicles():
+    """Delete all records where the model year is less than 2014 and retrieve the count of remaining records."""
+    client = get_bigtable_client()
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    
+    # First, identify rows to delete by finding those with model year < 2014
+    family_filter = row_filters.FamilyNameRegexFilter(b'ev_info')
+    
+    # Read the rows with just the family filter
+    rows = table.read_rows(filter_=family_filter)
+    
+    row_keys_to_delete = []
+    for row in rows:
+        model_year = None
+        
+        for column_family_id, columns in row.cells.items():
+            for column_qualifier, cells in columns.items():
+                if column_qualifier == b'Model Year':
+                    try:
+                        model_year = int(cells[0].value.decode('utf-8'))
+                    except ValueError:
+                        continue
+        
+        if model_year is not None and model_year < 2014:
+            row_keys_to_delete.append(row.row_key)
+    
+    # Delete the identified rows
+    rows_deleted = 0
+    for row_key in row_keys_to_delete:
+        row_to_delete = table.direct_row(row_key)
+        row_to_delete.delete()
+        row_to_delete.commit()
+        rows_deleted += 1
+    
+    # Count remaining rows
+    row_filter = row_filters.CellsColumnLimitFilter(1)
+    rows = table.read_rows(filter_=row_filter)
+    remaining_count = 0
+    for row in rows:
+        remaining_count += 1
+    
+    return str(remaining_count)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=3000, debug=True) 
