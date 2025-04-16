@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""
-Script to load CSV data into Google Cloud Bigtable.
-"""
+#reference: https://cloud.google.com/bigtable/docs/samples-python-hello
+#reference: https://stackoverflow.com/questions/43264484/writing-to-bigtable-from-python
 import csv
 import datetime
 import time

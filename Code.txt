@@ -1,71 +1,69 @@
 # load.py ------------------------------------------------------------------
 #!/usr/bin/env python3
-"""
-Script to load CSV data into Google Cloud Bigtable.
-"""
-import os
-import pandas as pd
+#reference: https://cloud.google.com/bigtable/docs/samples-python-hello
+#reference: https://stackoverflow.com/questions/43264484/writing-to-bigtable-from-python
+import csv
+import datetime
+import time
 from google.cloud import bigtable
 from google.cloud.bigtable import column_family
-from google.cloud.bigtable import row
+from google.cloud.bigtable import row_filters
 
-# configuration
+# Configuration
 PROJECT_ID = 'cs498-451021'
 INSTANCE_ID = 'ev-bigtable'
 TABLE_ID = 'ev-population'
+COLUMN_FAMILY_ID = 'ev_info'
 CSV_FILE = 'Electric_Vehicle_Population_Data.csv'
 
-# intializing bigtable client
 client = bigtable.Client(project=PROJECT_ID, admin=True)
 instance = client.instance(INSTANCE_ID)
 table = instance.table(TABLE_ID)
 
-# Read CSV in chunks to handle large files
-chunk_size = 1000
-chunks = pd.read_csv(CSV_FILE, chunksize=chunk_size)
+if not table.exists():
+    table.create(column_families={COLUMN_FAMILY_ID: column_family.MaxVersionsGCRule(1)})
 
+start_time = time.time()
 total_rows = 0
-for i, chunk in enumerate(chunks):
-    print(f"Processing chunk {i+1}...")
-    
-    rows_to_insert = []
-    for idx, row_data in chunk.iterrows():
-        row_key = str(row_data.iloc[0]).encode()
-        if not row_key or row_key == b'nan':
-            row_key = f"row-{total_rows + idx}".encode()
-        
-        direct_row = row.DirectRow(row_key)
-        
-        for col_name, value in row_data.items():
-            if pd.isna(value):
-                continue
-                
-            column = f"{col_name}".encode()
-            cell_value = str(value).encode()
-            
-            direct_row.set_cell(
-                'ev_data',
-                column,
-                cell_value,
-                timestamp=None
-            )
-        
-        rows_to_insert.append(direct_row)
-    
-    if rows_to_insert:
-        table.mutate_rows(rows_to_insert)
-        total_rows += len(rows_to_insert)
-        print(f"Inserted {len(rows_to_insert)} rows. Total rows inserted: {total_rows}")
+last_print_time = time.time()
 
-print(f"Completed loading {total_rows} rows to Bigtable table {TABLE_ID}") 
+with open(CSV_FILE, 'r') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        # Create unique row key using VIN and counter
+        row_key = f"{row['VIN (1-10)']}_{total_rows}".encode()
+        row_data = table.row(row_key)
+        
+        for column, value in row.items():
+            if value:  # Only add non-empty values
+                row_data.set_cell(
+                    COLUMN_FAMILY_ID,
+                    column.encode(),
+                    value.encode(),
+                    timestamp=datetime.datetime.now(datetime.UTC)
+                )
+        
+        table.mutate_rows([row_data])
+        total_rows += 1
+        
+        # Print progress every 5 seconds
+        current_time = time.time()
+        if current_time - last_print_time >= 5:
+            elapsed = current_time - start_time
+            rows_per_second = total_rows / elapsed
+            print(f"Processed {total_rows} rows... ({rows_per_second:.2f} rows/second)")
+            last_print_time = current_time
+
+end_time = time.time()
+total_time = end_time - start_time
+print(f"\nLoaded {total_rows} rows into Bigtable table {TABLE_ID}.")
+print(f"Total time: {total_time:.2f} seconds")
+print(f"Average speed: {total_rows/total_time:.2f} rows/second")
 
 ----------------------------------------------------------------------------------------------
 
 #app.py
 #!/usr/bin/env python3
-"""
-Flask API for interacting with Google Cloud Bigtable containing EV population data.
-"""
 from flask import Flask, jsonify
 from google.cloud import bigtable
 from google.cloud.bigtable import column_family
@@ -78,25 +76,11 @@ TABLE_ID = 'ev-population'
 
 app = Flask(__name__)
 
-def get_bigtable_client():
-    """Initialize and return a Bigtable client."""
+def get_bigtable_client(): # initialize bigtable client
     return bigtable.Client(project=PROJECT_ID, admin=True)
-
-@app.route('/')
-def home():
-    """Home page that lists available endpoints."""
-    endpoints = {
-        "/rows": "Returns the total number of entries in Bigtable",
-        "/Best-BMW": "Find the count of BMW EVs with an electric range > 100 miles",
-        "/tesla-owners": "Retrieve the count of all Tesla vehicles registered in Seattle",
-        "/update": "Update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles (POST)",
-        "/delete": "Delete all records where the model year is less than 2014 and retrieve the count of remaining records (DELETE)"
-    }
-    return jsonify(endpoints)
 
 @app.route('/rows', methods=['GET'])
 def get_total_rows():
-    """Returns the total number of entries in Bigtable."""
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
@@ -114,7 +98,6 @@ def get_total_rows():
 
 @app.route('/Best-BMW', methods=['GET'])
 def get_best_bmw():
-    """Find the count of BMW EVs with an electric range > 100 miles."""
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
@@ -175,8 +158,7 @@ def get_tesla_in_seattle():
     return str(count)
 
 @app.route('/update', methods=['POST'])
-def update_vehicle():
-    """Update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles."""
+def update_vehicle(): # update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
@@ -212,8 +194,8 @@ def update_vehicle():
         return "Vehicle not found", 404
 
 @app.route('/delete', methods=['DELETE'])
-def delete_old_vehicles():
-    """Delete all records where the model year is less than 2014 and retrieve the count of remaining records."""
+def delete_old_vehicles(): 
+    # delete all records where the model year is less than 2014 and retrieve the count of remaining records
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)

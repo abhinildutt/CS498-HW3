@@ -14,25 +14,11 @@ TABLE_ID = 'ev-population'
 
 app = Flask(__name__)
 
-def get_bigtable_client():
-    """Initialize and return a Bigtable client."""
+def get_bigtable_client(): # initialize bigtable client
     return bigtable.Client(project=PROJECT_ID, admin=True)
-
-@app.route('/')
-def home():
-    """Home page that lists available endpoints."""
-    endpoints = {
-        "/rows": "Returns the total number of entries in Bigtable",
-        "/Best-BMW": "Find the count of BMW EVs with an electric range > 100 miles",
-        "/tesla-owners": "Retrieve the count of all Tesla vehicles registered in Seattle",
-        "/update": "Update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles (POST)",
-        "/delete": "Delete all records where the model year is less than 2014 and retrieve the count of remaining records (DELETE)"
-    }
-    return jsonify(endpoints)
 
 @app.route('/rows', methods=['GET'])
 def get_total_rows():
-    """Returns the total number of entries in Bigtable."""
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
@@ -50,7 +36,6 @@ def get_total_rows():
 
 @app.route('/Best-BMW', methods=['GET'])
 def get_best_bmw():
-    """Find the count of BMW EVs with an electric range > 100 miles."""
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
@@ -111,8 +96,7 @@ def get_tesla_in_seattle():
     return str(count)
 
 @app.route('/update', methods=['POST'])
-def update_vehicle():
-    """Update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles."""
+def update_vehicle(): # update the electric range of the vehicle with DOL Vehicle ID 257246118 to 200 miles
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
@@ -148,8 +132,8 @@ def update_vehicle():
         return "Vehicle not found", 404
 
 @app.route('/delete', methods=['DELETE'])
-def delete_old_vehicles():
-    """Delete all records where the model year is less than 2014 and retrieve the count of remaining records."""
+def delete_old_vehicles(): 
+    # delete all records where the model year is less than 2014 and retrieve the count of remaining records
     client = get_bigtable_client()
     instance = client.instance(INSTANCE_ID)
     table = instance.table(TABLE_ID)
